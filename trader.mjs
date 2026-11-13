@@ -2,7 +2,8 @@
 //
 // Each trading session (ET):
 //   09:35+   train the bot on each horizon's live setup (once per session)
-//   10:00+   open the top conviction pick per horizon (intraday until 13:30, weekly/monthly until 15:00)
+//   10:00+   open the top conviction pick per horizon (intraday until 13:30 and only on real-time data,
+//            weekly/monthly until 15:00)
 //   every 5m mark open positions with real (15-min delayed) chain mids; close on profit target / stop
 //   16:05+   settle positions expiring today at the closing price
 // State is saved to data/paper-account.json; the bot's learned memory to data/paper-brain.json.
@@ -33,6 +34,7 @@ export const CFG = {
   slipPerLeg: 0.02, // $ per share worse than mid on every leg, each side
   feePerContract: 0.65, // per contract per side
   checkEveryMs: 5 * 60e3,
+  intradayNeedsRealtime: true, // no 0DTE entries on delayed quotes
 };
 const HZ = ['daily', 'weekly', 'monthly'];
 const HL = { daily: 'Intraday', weekly: 'Weekly', monthly: 'Monthly' };
@@ -151,6 +153,12 @@ function openTrades(c, date, hm) {
   for (const h of HZ) {
     const key = `${date}|${h}`;
     if (state.sessions[key] || hm > CFG.entryUntil[h]) continue;
+    // 0DTE signals on 15-minute-old quotes are mostly noise: intraday entries need real-time (Schwab) data.
+    if (h === 'daily' && CFG.intradayNeedsRealtime && c.raw.delayed !== false) {
+      state.sessions[key] = 'delayed-data';
+      log(`${HL[h]}: no 0DTE entry today — the options data is 15-min delayed (CBOE). Intraday trading turns on automatically with a real-time Schwab connection.`);
+      continue;
+    }
     if (state.positions.filter((p) => p.horizon === h).length >= CFG.maxOpen[h]) { state.sessions[key] = 'max-open'; continue; }
     const picked = pick(c, h);
     if (!picked) continue;

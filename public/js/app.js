@@ -774,11 +774,11 @@ function renderBt() {
   // summary by horizon
   const row = (label, list, entries, skipped, cls = '') => {
     const s = summarize(list);
-    return `<tr class="${cls}"><td class="left"><b>${label}</b></td><td>${entries ?? '—'}</td><td>${s.n}</td><td>${skipped ?? '—'}</td><td>${p(s.winRate)}</td>
-      <td class="${s.net >= 0 ? 'pos' : 'neg'}">${usd(s.net)}</td><td>${usd(s.avg)}</td><td class="${s.avgRor >= 0 ? 'pos' : 'neg'}">${p(s.avgRor, 1)}</td><td>${pf(s.pf)}</td><td class="neg">${usd(s.maxDD)}</td><td>${usd(s.best)}</td><td>${usd(s.worst)}</td></tr>`;
+    return `<tr class="${cls}"><td class="left"><b>${label}</b></td><td>${entries ?? '—'}</td><td>${s.n}</td><td>${skipped ?? '—'}</td><td>${p(s.winRate)}</td><td>${p(s.breakevenWR)}</td>
+      <td class="${s.net >= 0 ? 'pos' : 'neg'}">${usd(s.net)}</td><td>${usd(s.avg)}</td><td>${usd(s.avgWin)} / ${usd(s.avgLoss)}</td><td class="${s.avgRor >= 0 ? 'pos' : 'neg'}">${p(s.avgRor, 1)}</td><td>${pf(s.pf)}</td><td class="neg">${usd(s.maxDD)}</td><td>${usd(s.best)}</td><td class="neg">${usd(s.worst)}</td></tr>`;
   };
   const totEntries = hs.reduce((a, h) => a + res.entries[h], 0), totSkip = hs.reduce((a, h) => a + res.skipped[h], 0);
-  $('btSummary').innerHTML = `<thead><tr><th>Horizon</th><th>Entries</th><th>Trades</th><th>Stood aside</th><th>Win rate</th><th>Net P/L</th><th>Avg P/L</th><th>Avg return on risk</th><th>Profit factor</th><th>Max drawdown</th><th>Best</th><th>Worst</th></tr></thead><tbody>
+  $('btSummary').innerHTML = `<thead><tr><th>Horizon</th><th>Entries</th><th>Trades</th><th>Stood aside</th><th>Win rate</th><th title="Win rate needed to break even, given the average win and average loss">Break-even win rate</th><th>Net P/L</th><th>Avg P/L</th><th>Avg win / loss</th><th>Avg return on risk</th><th>Profit factor</th><th>Max drawdown</th><th>Best</th><th>Largest loss</th></tr></thead><tbody>
     ${hs.map((h) => row(HLABEL[h], picks.filter((t) => t.horizon === h), res.entries[h], res.skipped[h])).join('')}
     ${row('All bot picks', picks, totEntries, totSkip, 'lean')}
     ${row('Baseline: every strategy, every entry', res.trades, null, null)}</tbody>`;
@@ -834,6 +834,18 @@ function renderBtLog() {
       <td>${t.entrySpot.toFixed(2)} → ${t.exitSpot.toFixed(2)}</td><td class="left">${t.reason} ${new Date(t.exitMs).toISOString().slice(5, 10)}</td>
       <td>${fmt.usd(t.cost)}</td><td class="${t.pl >= 0 ? 'pos' : 'neg'}">${fmt.usd(t.pl)}</td><td>${fmt.pct(t.ror, 0)}</td></tr>`).join('')
     || '<tr><td colspan="11" class="hint">No trades for this filter.</td></tr>'}</tbody><tfoot><tr><td colspan="11" class="hint">* Regime in the backtest is the gamma stand-in, not real dealer positioning.</td></tr></tfoot>`;
+}
+
+// Real-chain archive progress (server saves SPY/SPX/QQQ chains 3x per trading day).
+async function loadArchiveStatus() {
+  const el = $('btArchive');
+  try {
+    const r = await fetch('/api/archive', { cache: 'no-store' });
+    if (!r.ok) throw new Error();
+    const s = await r.json();
+    el.textContent = s.off ? 'archiving is turned off (ARCHIVE=off)'
+      : s.days ? `${s.days} trading day${s.days === 1 ? '' : 's'} archived since ${s.first}, ${s.snapshots} chain snapshots, ${s.mb} MB` : 'archiving starts at 10:00 ET on the next trading day';
+  } catch { el.textContent = 'restart the server to start archiving'; }
 }
 
 // ---------------- forward test (real gamma) ----------------
@@ -909,7 +921,7 @@ function renderPaper() {
   $('paperStatus').className = 'banner info';
   $('paperStatus').innerHTML = !started
     ? `<b>Armed.</b> The bot starts trading <b>${cfg.startDate}</b> at 10:00 ET with $${cfg.startCapital.toLocaleString()} of paper money. Keep the server running (and the computer awake) during market hours, 9:30–4:15 ET.`
-    : `<b>Running.</b> ${lc ? `Last check ${t(lc.t)} ET · SPY ${lc.spot.toFixed(2)} · data ${lc.source === 'schwab' && !lc.delayed ? 'real-time (Schwab), checks every 2 min' : '15-min delayed (CBOE), checks every 5 min'}${lc.tradingToday ? '' : ' · market closed'}` : 'Waiting for the first check (9:35–5:00 ET on trading days).'} The server must stay running for the bot to trade.`;
+    : `<b>Running.</b> ${lc ? `Last check ${t(lc.t)} ET · SPY ${lc.spot.toFixed(2)} · data ${lc.source === 'schwab' && !lc.delayed ? 'real-time (Schwab), checks every 2 min' : `15-min delayed (CBOE), checks every 5 min${cfg.intradayNeedsRealtime ? ', intraday 0DTE entries paused until real-time data' : ''}`}${lc.tradingToday ? '' : ' · market closed'}` : 'Waiting for the first check (9:35–5:00 ET on trading days).'} The server must stay running for the bot to trade.`;
 
   const tiles = [
     ['Equity', fmt.usd(equity, 0), `started ${fmt.usd(st.startCapital, 0)}`, pl >= 0 ? 'pos' : 'neg'],
@@ -919,6 +931,16 @@ function renderPaper() {
     ['Risk in use', fmt.usd(openRisk, 0), `${fmt.pct(openRisk / equity, 0)} of equity (cap ${fmt.pct(cfg.maxOpenRisk, 0)})`],
     ['Win rate', st.closed.length ? fmt.pct(wins / st.closed.length, 0) : '—', `${wins} of ${st.closed.length}`],
   ];
+  // risk-aware stats: win rate alone hides strategies that win small and lose big
+  const ps = summarize(st.closed.map((c) => ({ ...c, exitMs: c.closedAt })));
+  const dash = (v, f) => (v == null ? '—' : f(v));
+  tiles.push(
+    ['Break-even win rate', dash(ps.breakevenWR, (v) => fmt.pct(v, 0)), ps.avgLoss == null ? 'needs a losing trade to compute' : `avg win ${fmt.usd(ps.avgWin, 0)} / loss ${fmt.usd(ps.avgLoss, 0)}`],
+    ['Avg return on risk', dash(ps.avgRor, (v) => `${fmt.signed(v * 100, 1)}%`), 'expectancy per $1 at risk', ps.avgRor == null ? '' : ps.avgRor >= 0 ? 'pos' : 'neg'],
+    ['Profit factor', dash(ps.pf, (v) => (v === Infinity ? '∞' : v.toFixed(2))), 'gross wins ÷ gross losses'],
+    ['Max drawdown', dash(st.closed.length ? ps.maxDD : null, (v) => fmt.usd(v, 0)), `largest loss ${dash(ps.worst, (v) => fmt.usd(Math.min(v, 0), 0))}`, 'neg'],
+    ['Sample size', `${st.closed.length}`, st.closed.length < 100 ? 'too few trades to judge — aim for 100+' : 'enough to start judging'],
+  );
   $('paperTiles').innerHTML = tiles.map(([k, v, s, c]) => `<div class="tile"><div class="k">${k}</div><div class="v ${c || ''}">${v}</div><div class="s">${s}</div></div>`).join('');
 
   // equity curve
@@ -975,7 +997,7 @@ function wire() {
     document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t));
     document.querySelectorAll('.tabpane').forEach((p) => p.classList.toggle('active', p.id === `tab-${t.dataset.tab}`));
     if (t.dataset.tab === 'bot') renderBot();
-    if (t.dataset.tab === 'backtest') { renderForward(); renderBt(); }
+    if (t.dataset.tab === 'backtest') { renderForward(); renderBt(); loadArchiveStatus(); }
     clearInterval(PA.timer);
     if (t.dataset.tab === 'paper') { loadPaper(); PA.timer = setInterval(loadPaper, 60_000); }
     window.dispatchEvent(new Event('resize'));

@@ -195,7 +195,11 @@ export function summarize(list) {
   const loss = list.filter((t) => t.pl <= 0).reduce((a, t) => a + t.pl, 0);
   let eq = 0, peak = 0, dd = 0;
   [...list].sort((a, b) => a.exitMs - b.exitMs).forEach((t) => { eq += t.pl; peak = Math.max(peak, eq); dd = Math.min(dd, eq - peak); });
+  const nLoss = list.length - wins.length;
+  const avgWin = wins.length ? gross / wins.length : null, avgLoss = nLoss ? loss / nLoss : null;
   return {
+    // win rate needed to break even given the average win and loss sizes (the honest bar for "80% win rate")
+    avgWin, avgLoss, breakevenWR: avgWin && avgLoss ? -avgLoss / (avgWin - avgLoss) : null,
     n: list.length, wins: wins.length, winRate: list.length ? wins.length / list.length : null,
     net: gross + loss, avg: list.length ? (gross + loss) / list.length : null,
     avgRor: list.length ? mean(list.map((t) => t.ror)) : null,

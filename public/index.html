@@ -32,7 +32,7 @@
       <button class="tab active" data-tab="levels">Gamma Levels</button>
       <button class="tab" data-tab="builder">Strategy Builder</button>
       <button class="tab" data-tab="bot">AI Trade Bot</button>
-      <button class="tab" data-tab="backtest">Backtest</button>
+      <button class="tab" data-tab="backtest">Backtest (proxy)</button>
       <button class="tab" data-tab="paper">Paper Account</button>
     </nav>
     <div class="top-actions">
@@ -332,7 +332,7 @@
   <main id="tab-backtest" class="tabpane">
     <section class="card">
       <div class="card-head wrap">
-        <h2>Backtest · last month <span class="hint" id="btWindow"></span></h2>
+        <h2>Proxy backtest · last month <span class="hint" id="btWindow"></span></h2>
         <div class="btn-row">
           <select id="btMgmt" class="sel"><option value="managed" selected>Profit target + stop</option><option value="hold">Hold to expiration</option></select>
           <label class="chk" title="Credit spreads: % of credit; debit spreads: % of max profit">Target · spreads <select id="btTpSpread" class="sel sm tp-spread"><option value="0.2">20%</option><option value="0.25">25%</option><option value="0.3">30%</option><option value="0.35">35%</option><option value="0.4">40%</option><option value="0.45">45%</option><option value="0.5" selected>50%</option></select></label>
@@ -343,8 +343,12 @@
           <label class="chk" title="Never take a trade the gamma regime argues against"><input type="checkbox" id="btVeto" checked /> Gamma veto</label>
           <label class="chk"><input type="checkbox" id="btConv" checked /> Only take conviction trades</label>
           <button class="btn primary" id="btRun">Run backtest</button>
-          <button class="btn sm" id="btTeach" disabled title="Feed every simulated outcome (all 14 strategies, every entry) into the bot's memory at low weight">Teach bot from results</button>
+          <button class="btn sm" id="btTeach" disabled title="Feed every simulated outcome (all 19 strategies, every entry) into the bot's memory at low weight">Teach bot from results</button>
         </div>
+      </div>
+      <div class="banner" style="margin:0">
+        <b>This is not a test of the gamma thesis.</b> It tests the confluence rules, strike selection and exits with a 20-day-average stand-in where the gamma levels should be.
+        A real gamma backtest will replace it once the server has archived a few weeks of actual option chains (<span id="btArchive">checking archive…</span>).
       </div>
       <div class="banner info" style="margin:0">
         <b>How to read this:</b> trades are replayed on real 15-minute SPY bars, real VWAP / 2-day AVWAP, realized vol and VIX history.

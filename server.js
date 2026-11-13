@@ -8,6 +8,7 @@
 //   APP_PASSWORD       require this password (HTTP Basic auth, any username) for every page and API call
 //   DATA_DIR           folder for the paper account and Schwab sign-in files (default ./data)
 //   PAPER=off          don't run the paper-trading bot
+//   ARCHIVE=off        don't save daily option chains / bars to DATA_DIR/archive
 //   DATA_PROVIDER      auto (Schwab when connected, else CBOE; default) | schwab | cboe
 //   SCHWAB_APP_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK   Schwab developer app credentials
 import http from 'node:http';
@@ -18,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { buildMarket } from './public/js/data.js';
 import { computeLevels, groupExps } from './public/js/levels.js';
 import { createSchwab } from './schwab.mjs';
+import { startArchive } from './archive.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 try { if (fs.existsSync(path.join(ROOT, '.env'))) process.loadEnvFile(path.join(ROOT, '.env')); } catch (e) { console.error('Could not read .env:', e.message); }
@@ -128,7 +130,7 @@ async function getGamma(sym) {
   });
 }
 
-const INTERVALS = { '5m': ['5m', '5d'], '15m': ['15m', '1mo'], '15m60': ['15m', '60d'], '1h': ['60m', '3mo'], '1d': ['1d', '1y'] };
+const INTERVALS = { '1m': ['1m', '1d'], '5m': ['5m', '5d'], '15m': ['15m', '1mo'], '15m60': ['15m', '60d'], '1h': ['60m', '3mo'], '1d': ['1d', '1y'] };
 async function getCandles(sym, tf) {
   const [interval, range] = INTERVALS[tf] || INTERVALS['5m'];
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(YAHOO[sym] || sym)}?interval=${interval}&range=${range}&includePrePost=false`;
@@ -193,6 +195,7 @@ const server = http.createServer(async (req, res) => {
       } catch (e) { return sendJson(res, 400, { error: e.message }); }
     }
     if (url.pathname === '/api/schwab/disconnect' && req.method === 'POST') { cache.clear(); return sendJson(res, 200, schwab.disconnect()); }
+    if (url.pathname === '/api/archive') return sendJson(res, 200, archive ? archive.status() : { off: true });
     if (url.pathname === '/api/paper') {
       if (!trader) return sendJson(res, 503, { error: 'Paper trader is starting' });
       return sendJson(res, 200, trader.snapshot());
@@ -227,6 +230,10 @@ server.listen(PORT, () => {
   console.log(`Options data: ${useSchwab() ? `Schwab real-time (sign-in valid ${st.hoursLeft.toFixed(0)} more hours)` : st.configured ? 'CBOE delayed; Schwab configured but not signed in (use the Data button in the app)' : 'CBOE delayed (Schwab not configured)'}.`);
 });
 
+// Archive: saves real chains (3x a day) and intraday bars every trading day for a future real-gamma backtest.
+const cachedCandles = (s, tf) => cached(`candles:${s}:${tf}`, 60_000, () => getCandles(s, tf));
+const archive = process.env.ARCHIVE === 'off' ? null : startArchive({ dir: DATA_DIR, getChain: getCachedChain, getCandles: cachedCandles, getGamma });
+
 // Paper trader: runs the bot on a fake $10,000 account while this server is running.
 let trader = null;
 if (process.env.PAPER !== 'off') {
@@ -234,7 +241,7 @@ if (process.env.PAPER !== 'off') {
     .then((m) => {
       trader = m.start({
         getChain: getCachedChain,
-        getCandles: (s, tf) => cached(`candles:${s}:${tf}`, 60_000, () => getCandles(s, tf)),
+        getCandles: cachedCandles,
         getGamma,
         dir: DATA_DIR,
       });
