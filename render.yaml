@@ -1,0 +1,23 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# The paper-trading bot needs an always-on instance and a persistent disk, so this uses the
+# paid "starter" plan. On the free plan the service sleeps when idle (pausing the bot) and
+# its files are wiped on every restart (resetting the paper account).
+services:
+  - type: web
+    name: gammadesk
+    runtime: node
+    plan: starter
+    buildCommand: "true"
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: APP_PASSWORD
+        sync: false # you'll be asked for a value when creating the service
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: gammadesk-data
+      mountPath: /var/data
+      sizeGB: 1

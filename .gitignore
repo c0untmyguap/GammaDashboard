@@ -1,0 +1,17 @@
+# Paper-trading account and the bot's learned memory (personal, changes constantly)
+data/
+
+# Local secrets
+.env
+.env.*
+
+# Editor / OS / tooling
+.claude/
+.vscode/
+.idea/
+node_modules/
+*.log
+*.bak
+Thumbs.db
+desktop.ini
+.DS_Store
