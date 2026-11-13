@@ -29,6 +29,9 @@ const A = { mkt: null, candles: null, results: {}, custom: new Set(), charts: {}
 
 // ---------------- data ----------------
 async function loadAll(showBanner = true) {
+  // Only the latest load may update the page: switching tickers mid-load would otherwise mix two symbols.
+  const seq = (A.loadSeq = (A.loadSeq || 0) + 1);
+  const stale = () => seq !== A.loadSeq;
   $('refreshBtn').disabled = true;
   try {
     const soft = (p) => p.catch(() => null);
@@ -39,6 +42,7 @@ async function loadAll(showBanner = true) {
       soft(loadCandles(P.symbol, '1d')),
       soft(loadCandles('^VIX', '1d')),
     ]);
+    if (stale()) return;
     A.mkt = mkt;
     A.candles = candles;
     A.intraday = intraday; A.daily = daily; A.vixDaily = vixDaily;
@@ -56,6 +60,7 @@ async function loadAll(showBanner = true) {
     Memory.snapshot(mkt, A.results);
     A.memStats = daily ? Memory.levelStats(mkt.symbol, daily.candles, daily.gmtoffset) : null;
     await loadIndexGamma();
+    if (stale()) return;
     if (P.groupsOn.spx === undefined) P.groupsOn.spx = true;
     renderToggles();
     renderQuote();
@@ -67,9 +72,9 @@ async function loadAll(showBanner = true) {
     renderForward();
     Bot.scoreJournal(mkt.symbol).then((r) => { if (r.scored) { renderBot(); renderForward(); } }).catch(() => {});
   } catch (e) {
-    if (showBanner) banner(`Could not load ${P.symbol}: ${e.message}. Is the local server running (node server.js)?`);
+    if (showBanner && !stale()) banner(`Could not load ${P.symbol}: ${e.message}. Is the local server running (node server.js)?`);
   } finally {
-    $('refreshBtn').disabled = false;
+    if (!stale()) $('refreshBtn').disabled = false;
   }
 }
 
@@ -184,11 +189,16 @@ function renderPriceChart(reset) {
   const data = (A.candles.candles || []).map((c) => ({ time: c.time + off, open: c.open, high: c.high, low: c.low, close: c.close }));
   A.series.setData(data);
   drawIndicators(off);
+  // a new symbol or timeframe always gets a fresh view and a re-fitted price scale
+  const key = `${A.mkt?.symbol}|${P.tf}`;
+  if (A.chartKey !== key) { reset = true; A.chartKey = key; }
   if (reset && data.length) {
     const n = data.length;
     const show = P.tf === '1d' ? 120 : P.tf === '1h' ? 140 : 160;
+    A.price.priceScale('right').applyOptions({ autoScale: true });
     A.price.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - show), to: n + 8 });
   }
+  if (!data.length) banner(`No price history available for ${A.mkt?.symbol ?? P.symbol} on the ${P.tf} timeframe. Levels and options data are still loaded.`, 'info');
   renderLevelsTab();
 }
 
@@ -919,7 +929,11 @@ function wire() {
     const b = e.target.closest('[data-tf]');
     if (!b || b.dataset.tf === P.tf) return;
     P.tf = b.dataset.tf; savePrefs();
-    try { A.candles = await loadCandles(P.symbol, P.tf); } catch (err) { A.candles = { candles: [] }; banner(`Candles unavailable: ${err.message}`, 'info'); }
+    const sym = P.symbol, tf = P.tf;
+    let next;
+    try { next = await loadCandles(sym, tf); } catch (err) { next = { candles: [] }; banner(`Candles unavailable: ${err.message}`, 'info'); }
+    if (sym !== P.symbol || tf !== P.tf || A.mkt?.symbol !== sym) return; // user switched again meanwhile
+    A.candles = next;
     renderPriceChart(true);
   };
   $('groupToggles').onclick = (e) => {
