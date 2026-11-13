@@ -17,6 +17,12 @@
       <input id="tickerInput" value="SPY" maxlength="6" spellcheck="false" aria-label="Ticker" />
       <button class="btn">Load</button>
     </form>
+    <div class="btn-row" id="symRow" title="Switch the whole app to another underlying">
+      <button class="btn sm seg" data-sym="SPY">SPY</button>
+      <button class="btn sm seg" data-sym="SPX">SPX</button>
+      <button class="btn sm seg" data-sym="ES" title="/ES levels = SPX gamma + the ES–SPX basis (CME ES options data isn't free)">/ES</button>
+      <button class="btn sm seg" data-sym="QQQ">QQQ</button>
+    </div>
     <div class="quote" id="quote">
       <span class="q-price" id="qPrice">—</span>
       <span class="q-chg" id="qChg"></span>
@@ -275,6 +281,11 @@
     <section class="card">
       <div class="card-head wrap"><h2>Confluence matrix <span class="hint">hover a cell for the reasoning · gamma rows first, then VWAP, then volatility</span></h2><span class="hint" id="leanHint"></span></div>
       <div class="table-wrap"><table class="tbl conf-matrix" id="confTable"></table></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head wrap"><h2>Index gamma <span class="hint">SPX carries the big-money hedging; /ES = SPX levels + basis; QQQ for tech · used as confluence for every trade</span></h2><span class="hint" id="idxHint"></span></div>
+      <div class="table-wrap"><table class="tbl num" id="idxTable"></table></div>
     </section>
 
     <section class="grid-2">

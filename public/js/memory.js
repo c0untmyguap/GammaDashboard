@@ -8,10 +8,12 @@ let mem = (() => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } c
 const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(mem)); } catch { /* ignore */ } };
 
 // The session the current chain describes: after the 16:00 ET close it is the next weekday.
+// CBOE chain timestamps are UTC ("YYYY-MM-DD HH:MM:SS").
 export function targetSession(chainTs) {
-  const [d, t = '00:00'] = String(chainTs).split(' ');
-  const dt = new Date(`${d}T00:00:00Z`);
-  if (+t.slice(0, 2) >= 16) dt.setUTCDate(dt.getUTCDate() + 1);
+  const utc = new Date(`${String(chainTs).replace(' ', 'T')}Z`);
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false }).formatToParts(utc).map((x) => [x.type, x.value]));
+  const dt = new Date(`${p.year}-${p.month}-${p.day}T00:00:00Z`);
+  if (+p.hour % 24 >= 16) dt.setUTCDate(dt.getUTCDate() + 1);
   while ([0, 6].includes(dt.getUTCDay())) dt.setUTCDate(dt.getUTCDate() + 1);
   return dt.toISOString().slice(0, 10);
 }

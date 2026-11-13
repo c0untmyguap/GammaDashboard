@@ -12,6 +12,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { buildMarket } from './public/js/data.js';
+import { computeLevels, groupExps } from './public/js/levels.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 5173;
@@ -30,12 +32,19 @@ async function cached(key, ttlMs, fn) {
   return v;
 }
 
+// Index options live under a different CBOE file and several option roots (SPX monthlies + SPXW weeklies/dailies).
+const CHAIN_SRC = { SPX: { cboe: '_SPX', roots: ['SPX', 'SPXW'] }, NDX: { cboe: '_NDX', roots: ['NDX', 'NDXP'] } };
+// Yahoo symbols for candles (^GSPC is unreliable intraday; ^SPX matches CBOE).
+const YAHOO = { SPX: '^SPX', ES: 'ES=F', NDX: '^NDX', NQ: 'NQ=F' };
+
 async function getChain(sym) {
-  const r = await fetch(`https://cdn.cboe.com/api/global/delayed_quotes/options/${sym}.json`, { headers: UA });
+  if (sym === 'ES') return getEsChain();
+  const src = CHAIN_SRC[sym] || { cboe: sym, roots: [sym] };
+  const r = await fetch(`https://cdn.cboe.com/api/global/delayed_quotes/options/${src.cboe}.json`, { headers: UA });
   if (!r.ok) throw new Error(`CBOE returned ${r.status} for ${sym}`);
   const d = await r.json();
   const { options, ...quote } = d.data;
-  const re = new RegExp(`^${sym}(\\d{6})([CP])(\\d{8})$`);
+  const re = new RegExp(`^(?:${src.roots.join('|')})(\\d{6})([CP])(\\d{8})$`);
   const expIndex = new Map();
   const expirations = [];
   const contracts = [];
@@ -50,10 +59,51 @@ async function getChain(sym) {
   return { symbol: sym, timestamp: d.timestamp, quote, expirations, contracts };
 }
 
+// ES-SPX basis: median difference of the last 6 matching 5-minute closes of ES=F and ^SPX.
+async function getEsBasis() {
+  return cached('basis:ES', 60_000, async () => {
+    const [es, spx] = await Promise.all([getCandles('ES', '5m'), getCandles('SPX', '5m')]);
+    const sp = new Map(spx.candles.map((c) => [c.time, c.close]));
+    const diffs = es.candles.filter((c) => sp.has(c.time)).slice(-6).map((c) => c.close - sp.get(c.time)).sort((a, b) => a - b);
+    if (!diffs.length) throw new Error('No overlapping ES/SPX bars for the basis');
+    const last = es.candles[es.candles.length - 1];
+    return { basis: diffs[Math.floor(diffs.length / 2)], es: last.close, esTime: last.time };
+  });
+}
+
+// CME doesn't publish ES options data for free, so /ES gamma = SPX gamma shifted by the ES-SPX basis.
+async function getEsChain() {
+  const [spx, b] = await Promise.all([cached('chain:SPX', 60_000, () => getChain('SPX')), getEsBasis()]);
+  const shift = Math.round(b.basis * 4) / 4; // ES ticks in 0.25s
+  const q = spx.quote;
+  return {
+    ...spx, symbol: 'ES', basis: shift,
+    // Spot is SPX-equivalent (SPX + basis) so ES levels are exactly SPX levels + basis; es_last is the live future.
+    quote: { ...q, symbol: 'ES', current_price: q.current_price + shift, close: q.close + shift, prev_day_close: q.prev_day_close + shift, spx_price: q.current_price, basis: shift, es_last: b.es },
+    contracts: spx.contracts.map((c) => { const x = c.slice(); x[2] = c[2] + shift; return x; }),
+  };
+}
+
+// Compact gamma levels per expiration set, computed server-side (used by the bot, the trader and the index panel).
+async function getGamma(sym) {
+  return cached(`gamma:${sym}`, 60_000, async () => {
+    const raw = await cached(`chain:${sym}`, 60_000, () => getChain(sym));
+    const mkt = buildMarket(raw);
+    const groups = {};
+    for (const g of ['daily', 'weekly', 'monthly']) {
+      const ex = groupExps(mkt, g, []);
+      if (!ex.length) continue;
+      const r = computeLevels(mkt, ex);
+      groups[g] = { regime: r.regime, total: r.total, flip: r.flip, em: r.em, exps: ex, levels: Object.fromEntries(Object.entries(r.levels).map(([k, v]) => [k, v.price])) };
+    }
+    return { symbol: sym, spot: mkt.spot, timestamp: raw.timestamp, basis: raw.basis ?? null, groups };
+  });
+}
+
 const INTERVALS = { '5m': ['5m', '5d'], '15m': ['15m', '1mo'], '15m60': ['15m', '60d'], '1h': ['60m', '3mo'], '1d': ['1d', '1y'] };
 async function getCandles(sym, tf) {
   const [interval, range] = INTERVALS[tf] || INTERVALS['5m'];
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=${interval}&range=${range}&includePrePost=false`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(YAHOO[sym] || sym)}?interval=${interval}&range=${range}&includePrePost=false`;
   const r = await fetch(url, { headers: UA });
   if (!r.ok) throw new Error(`Yahoo returned ${r.status}`);
   const d = await r.json();
@@ -101,6 +151,7 @@ const server = http.createServer(async (req, res) => {
       // ^ prefix allowed for Yahoo index symbols such as ^VIX (candles only)
       if (!/^\^?[A-Z_]{1,6}$/.test(sym)) return sendJson(res, 400, { error: 'Invalid symbol' });
       if (url.pathname === '/api/chain') return sendJson(res, 200, await cached(`chain:${sym}`, 60_000, () => getChain(sym)));
+      if (url.pathname === '/api/gamma') return sendJson(res, 200, await getGamma(sym));
       if (url.pathname === '/api/candles') {
         const tf = url.searchParams.get('tf') || '5m';
         return sendJson(res, 200, await cached(`candles:${sym}:${tf}`, 60_000, () => getCandles(sym, tf)));
@@ -129,6 +180,7 @@ if (process.env.PAPER !== 'off') {
       trader = m.start({
         getChain: (s) => cached(`chain:${s}`, 60_000, () => getChain(s)),
         getCandles: (s, tf) => cached(`candles:${s}:${tf}`, 60_000, () => getCandles(s, tf)),
+        getGamma,
         dir: DATA_DIR,
       });
       console.log(`Paper trader running (state in ${path.join(DATA_DIR, 'paper-account.json')}). Keep this running during market hours.`);

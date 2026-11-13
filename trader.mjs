@@ -102,6 +102,9 @@ async function context() {
   const ip = i5 ? intradayProfile(i5.candles, i5.gmtoffset) : null;
   const rv5 = d1 ? realizedVol(d1.candles, 5) : null, rv20 = d1 ? realizedVol(d1.candles, 20) : null;
   const vix = vx ? vixStats(vx.candles) : null;
+  // index gamma: SPX (big-money hedging), /ES = SPX + basis, QQQ (tech)
+  const [spx, es, qqq] = await Promise.all(['SPX', 'ES', 'QQQ'].map((s) => (ctx.getGamma ? soft(ctx.getGamma(s)) : null)));
+  const idx = { spx, es, qqq, map: spx && CFG.symbol === 'SPY' ? mkt.spot / spx.spot : null };
   const env = (h) => {
     const lv = results[h];
     if (!lv) return null;
@@ -109,9 +112,9 @@ async function context() {
     const iv = ivProfile(mkt, exp);
     const rv = h === 'daily' ? (ip?.rvIntraday || rv5) : h === 'weekly' ? ((rv5 || 0) + (rv20 || 0)) / 2 || null : rv20;
     const sm = mkt.spot * iv.atm * Math.sqrt(Math.max(yearsTo(exp), 1 / 365));
-    return { S: mkt.spot, horizon: h, lv, all: results, ip, iv, rv, vix, mem: null, sm, exp };
+    return { S: mkt.spot, horizon: h, lv, all: results, ip, iv, rv, vix, mem: null, sm, exp, idx, symbol: CFG.symbol };
   };
-  return { raw, mkt, results, ip, d1, env };
+  return { raw, mkt, results, ip, d1, env, idx };
 }
 
 function pick(c, h) {
@@ -128,7 +131,8 @@ function pick(c, h) {
     const rank = (conviction ? 10 : 0) + learned * (1 + 0.15 * sc.net) + (plan.edge > 0 ? 0.05 : 0) + (Bot.FLY_FAMILY.has(x.t.id) ? CFG.flyPref : 0);
     return { ...x, sc, plan, learned, conviction, rank, key, exp: e.exp };
   }).sort((a, b) => b.rank - a.rank);
-  return ranked.find((x) => x.conviction) || { none: true, best: ranked[0] };
+  const conviction = ranked.filter((x) => x.conviction);
+  return conviction.length ? { list: conviction } : { none: true, best: ranked[0] };
 }
 
 // ---------- actions ----------
@@ -139,7 +143,8 @@ async function trainSession(c, date) {
     await Bot.train(c.mkt, lv, h, CFG.train.episodes, { ...CFG.train, vwap: c.ip?.vwap }, 'managed', () => {});
   }
   state.trainedOn[date] = true;
-  log(`Trained ${CFG.train.episodes.toLocaleString()} episodes per horizon on today's gamma setup.`);
+  const r = (g) => (g ? (g.regime === 'positive' ? '+γ' : '−γ') : 'n/a');
+  log(`Trained ${CFG.train.episodes.toLocaleString()} episodes per horizon on today's gamma setup. Index gamma (weekly): SPX ${r(c.idx.spx?.groups.weekly)} flip ${c.idx.spx?.groups.weekly?.flip?.toFixed(0) ?? '—'}${c.idx.es?.basis != null ? ` (ES basis ${c.idx.es.basis >= 0 ? '+' : ''}${c.idx.es.basis})` : ''}, QQQ ${r(c.idx.qqq?.groups.weekly)}.`);
 }
 
 function openTrades(c, date, hm) {
@@ -147,21 +152,31 @@ function openTrades(c, date, hm) {
     const key = `${date}|${h}`;
     if (state.sessions[key] || hm > CFG.entryUntil[h]) continue;
     if (state.positions.filter((p) => p.horizon === h).length >= CFG.maxOpen[h]) { state.sessions[key] = 'max-open'; continue; }
-    const choice = pick(c, h);
-    if (!choice) continue;
-    if (choice.none) {
+    const picked = pick(c, h);
+    if (!picked) continue;
+    if (picked.none) {
       state.sessions[key] = 'stood-aside';
-      log(`${HL[h]}: stood aside — best idea ${choice.best?.t.name ?? '—'} had ${choice.best?.sc.conf.length ?? 0} confluences (need ${CFG.rules.minConf}${CFG.rules.gammaVeto ? ', gamma veto on' : ''}).`);
+      log(`${HL[h]}: stood aside — best idea ${picked.best?.t.name ?? '—'} had ${picked.best?.sc.conf.length ?? 0} confluences (need ${CFG.rules.minConf}${CFG.rules.gammaVeto ? ', gamma veto on' : ''}).`);
       continue;
     }
-    const legs = choice.legs.map(({ id, ...l }) => l);
-    const n = contractsPerLot(legs);
-    const costLot = valueLot(c.mkt, legs) + slipPerLot(legs); // + debit paid / - credit received, after slippage
-    const riskLot = Math.max(choice.risk, 1) + n * CFG.feePerContract * 2;
+    // take the highest-ranked conviction trade that fits the risk budget
     const eq = equityNow();
     const budget = Math.min(CFG.riskPerTrade * eq, CFG.maxOpenRisk * eq - openRisk());
-    const lots = Math.min(CFG.maxLots, Math.floor(budget / riskLot));
-    if (lots < 1) { state.sessions[key] = 'too-large'; log(`${HL[h]}: skipped ${choice.t.name} — $${riskLot.toFixed(0)} risk per lot exceeds the remaining risk budget ($${budget.toFixed(0)}).`); continue; }
+    const sized = picked.list.map((x) => {
+      const xl = x.legs.map(({ id, ...l }) => l);
+      const xn = contractsPerLot(xl);
+      const xr = Math.max(x.risk, 1) + xn * CFG.feePerContract * 2;
+      return { choice: x, legs: xl, n: xn, riskLot: xr, lots: Math.min(CFG.maxLots, Math.floor(budget / xr)) };
+    });
+    const fit = sized.find((z) => z.lots >= 1);
+    if (!fit) {
+      state.sessions[key] = 'too-large';
+      log(`${HL[h]}: skipped — none of ${sized.length} conviction trade(s) fit the $${budget.toFixed(0)} risk budget (smallest needs $${Math.min(...sized.map((z) => z.riskLot)).toFixed(0)} per lot).`);
+      continue;
+    }
+    const { choice, legs, n, riskLot, lots } = fit;
+    const costLot = valueLot(c.mkt, legs) + slipPerLot(legs); // + debit paid / - credit received, after slippage
+    if (fit !== sized[0]) log(`${HL[h]}: top pick ${sized[0].choice.t.name} needs $${sized[0].riskLot.toFixed(0)} per lot (over the $${budget.toFixed(0)} budget); taking the next conviction trade that fits.`);
     const fees = lots * n * CFG.feePerContract;
     const pos = {
       id: `${date}-${h}`, horizon: h, strat: choice.t.id, name: choice.t.name, bias: choice.t.bias, legs, lots,
@@ -255,8 +270,8 @@ export function snapshot() {
   return { cfg: CFG, state, equity: equityNow(), openRisk: openRisk(), now: Date.now(), et: et() };
 }
 
-export function start({ getChain, getCandles, dir }) {
-  ctx = { getChain, getCandles, dir };
+export function start({ getChain, getCandles, getGamma, dir }) {
+  ctx = { getChain, getCandles, getGamma, dir };
   Object.assign(Bot.EXIT, CFG.exit);
   load();
   save();

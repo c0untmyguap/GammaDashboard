@@ -17,8 +17,8 @@ const $p = (v) => (+v).toFixed(2);
 function sig(id, name, horizons) { return { id, name, horizons, dir: {}, vol: {}, detail: '', na: false }; }
 
 // Multi-timeframe level clusters: levels from 2+ of daily/weekly/monthly within 0.25% of each other.
-export function stackedLevels(all, S) {
-  const pts = [];
+export function stackedLevels(all, S, extra = []) {
+  const pts = [...extra];
   for (const [g, tag] of [['daily', 'D'], ['weekly', 'W'], ['monthly', 'M']]) {
     const r = all[g];
     if (!r) continue;
@@ -36,7 +36,16 @@ export function stackedLevels(all, S) {
     .map((c) => ({ ...c, label: [...new Set(c.items.map((i) => `${lbl(i.id)} ${i.tag}`))].join(' + '), side: c.price < S ? 'support' : 'resistance', dist: (c.price - S) / S }));
 }
 
-// env: { S, horizon, lv, all, ip (intraday profile), iv (ivProfile), rv, vix, mem (level stats), sm (1-sigma move $) }
+// SPX gamma levels for this horizon, translated into the traded symbol's prices (SPY = SPX x ratio).
+// env.idx = { spx, es, qqq: /api/gamma summaries, map: price ratio or null when the symbol isn't SPY }
+export function idxPoints(env, ids = ['P1', 'P2', 'CW', 'PW', 'N1', 'FLIP']) {
+  const g = env.idx?.spx?.groups?.[env.horizon];
+  const k = env.idx?.map;
+  if (!g || !k) return [];
+  return ids.filter((id) => g.levels[id] != null).map((id) => ({ p: g.levels[id] * k, id, tag: 'SPX', native: g.levels[id] }));
+}
+
+// env: { S, horizon, lv, all, ip (intraday profile), iv (ivProfile), rv, vix, mem (level stats), sm (1-sigma move $), idx, symbol }
 export function buildSignals(env) {
   const { S, horizon, lv, all, ip, iv, rv, vix, mem, sm } = env;
   const L = (id) => lv?.levels[id]?.price;
@@ -70,9 +79,9 @@ export function buildSignals(env) {
   else { s.dir = { range: 0.75 }; s.detail = `Inside the ${pw}–${cw} wall range.`; }
   out.push(s);
 
-  // 4. Multi-timeframe stacked levels
-  s = sig('stack', 'Stacked levels (D/W/M)', ['daily', 'weekly', 'monthly']);
-  const st = stackedLevels(all, S).filter((c) => Math.abs(c.price - S) <= sm);
+  // 4. Multi-timeframe stacked levels (+ SPX levels translated to this symbol)
+  s = sig('stack', 'Stacked levels (D/W/M/SPX)', ['daily', 'weekly', 'monthly']);
+  const st = stackedLevels(all, S, idxPoints(env)).filter((c) => Math.abs(c.price - S) <= sm);
   const sup = st.filter((c) => c.side === 'support').sort((a, b) => b.price - a.price)[0];
   const res = st.filter((c) => c.side === 'resistance').sort((a, b) => a.price - b.price)[0];
   const pin = st.find((c) => Math.abs(c.dist) < 0.0015 && c.items.some((i) => i.id === 'P1'));
@@ -81,6 +90,43 @@ export function buildSignals(env) {
   else if (sup) { s.dir = { bull: 1 }; s.detail = `Stacked support below: ${sup.label} @ ${$p(sup.price)}.`; }
   else if (res) { s.dir = { bear: 1 }; s.detail = `Stacked resistance above: ${res.label} @ ${$p(res.price)}.`; }
   else { s.na = true; s.detail = 'No multi-timeframe level within 1σ.'; }
+  out.push(s);
+
+  // 4b-4d. Index gamma: SPX (and /ES = SPX + basis) carries the big-money hedging flows; QQQ for tech.
+  const idx = env.idx || {};
+  const gS = idx.spx?.groups?.[horizon], gE = idx.es?.groups?.[horizon];
+  const esTxt = (v) => (idx.es?.basis != null && v != null ? ` (ES ≈ ${(v + idx.es.basis).toFixed(0)})` : '');
+  const native = ['SPX', 'ES'].includes(env.symbol);
+  s = sig('spx', 'SPX / ES gamma regime', ['daily', 'weekly', 'monthly']);
+  if (native || !gS) { s.na = true; s.detail = native ? 'Already the traded index (see Gamma regime).' : 'SPX gamma unavailable.'; }
+  else if (gS.regime === 'positive') { s.dir = { range: 1, move: -0.5 }; s.vol = { short: 0.5 }; s.detail = `SPX dealers are long gamma on ${H[horizon].toLowerCase()} expirations: index hedging dampens moves.`; }
+  else { s.dir = { move: 1, range: -0.5 }; s.vol = { long: 0.5 }; s.detail = `SPX dealers are short gamma on ${H[horizon].toLowerCase()} expirations: index hedging amplifies moves.`; }
+  out.push(s);
+
+  s = sig('spxloc', 'SPX / ES location', ['daily', 'weekly', 'monthly']);
+  if (native || !gS) { s.na = true; s.detail = native ? 'Already the traded index (see flip and walls).' : 'SPX gamma unavailable.'; }
+  else {
+    const X = idx.spx.spot, f = gS.flip, xcw = gS.levels.CW, xpw = gS.levels.PW, xtol = 0.35 * sm * (X / S);
+    if (xpw && X < xpw) { s.dir = { bear: 1, move: 0.5, range: -1 }; s.detail = `SPX ${X.toFixed(0)} is below its put wall ${xpw}${esTxt(xpw)}: index support broken.`; }
+    else if (xcw && X > xcw) { s.dir = { bull: 1, move: 0.5, range: -1 }; s.detail = `SPX ${X.toFixed(0)} is above its call wall ${xcw}${esTxt(xcw)}: index resistance broken.`; }
+    else if (xpw && X - xpw <= xtol) { s.dir = { bull: 1, bear: -0.5 }; s.detail = `SPX ${X.toFixed(0)} is sitting on its put wall ${xpw}${esTxt(xpw)} (support).`; }
+    else if (xcw && xcw - X <= xtol) { s.dir = { bear: 1, bull: -0.5 }; s.detail = `SPX ${X.toFixed(0)} is pressing its call wall ${xcw}${esTxt(xcw)} (resistance).`; }
+    else if (f && X > f) { s.dir = { bull: 0.75, bear: -0.5 }; s.detail = `SPX ${X.toFixed(0)} is ${pct(X / f - 1)} above its gamma flip ${f.toFixed(0)}${esTxt(f)}.`; }
+    else if (f) { s.dir = { bear: 0.75, bull: -0.5 }; s.detail = `SPX ${X.toFixed(0)} is ${pct(1 - X / f)} below its gamma flip ${f.toFixed(0)}${esTxt(f)}: selling can accelerate.`; }
+    else { s.na = true; s.detail = 'No SPX flip in range.'; }
+  }
+  out.push(s);
+
+  s = sig('qqq', 'QQQ gamma (tech)', ['daily', 'weekly', 'monthly']);
+  const gQ = idx.qqq?.groups?.[horizon];
+  if (env.symbol === 'QQQ' || !gQ) { s.na = true; s.detail = env.symbol === 'QQQ' ? 'Already the traded symbol.' : 'QQQ gamma unavailable.'; }
+  else {
+    const Q = idx.qqq.spot, f = gQ.flip, above = f != null && Q >= f;
+    if (gQ.regime === 'positive' && above) { s.dir = { bull: 0.5, range: 0.5 }; s.detail = `QQQ ${Q.toFixed(2)} long gamma and above its flip ${f.toFixed(2)}: tech supported.`; }
+    else if (gQ.regime === 'positive') { s.dir = { range: 0.5 }; s.detail = `QQQ long gamma but below its flip ${f?.toFixed(2) ?? '—'}: contained.`; }
+    else if (!above) { s.dir = { bear: 0.75, move: 0.5 }; s.detail = `QQQ ${Q.toFixed(2)} short gamma and below its flip ${f?.toFixed(2) ?? '—'}: tech is a drag.`; }
+    else { s.dir = { move: 0.5 }; s.detail = `QQQ short gamma but above its flip ${f.toFixed(2)}: volatile either way.`; }
+  }
   out.push(s);
 
   // 5. Session VWAP
@@ -187,6 +233,7 @@ function vwapZones(env) {
     if (!r) continue;
     for (const id of ['P1', 'P2', 'CW', 'PW', 'N1', 'FLIP']) if (r.levels[id]) levels.push([`${lbl(id)}${tag}`, r.levels[id].price]);
   }
+  for (const x of idxPoints(env)) levels.push([`${lbl(x.id)} SPX`, x.p]);
   const zones = [];
   for (const [vn, vp] of lines) {
     const hits = levels.filter(([, p]) => Math.abs(p / vp - 1) < 0.0015);
@@ -249,6 +296,7 @@ export function entryPlan(legs, bias, env) {
     if (!r) continue;
     for (const id of ['P1', 'P2', 'CW', 'PW', 'N1', 'FLIP']) if (r.levels[id]) cands.push([`${lbl(id)}${tag}`, r.levels[id].price]);
   }
+  for (const x of idxPoints(env)) cands.push([`${lbl(x.id)} SPX ${x.native.toFixed(0)}`, x.p]);
   const near = cands.filter(([, p]) => Math.abs(p - S) <= sm && Math.abs(p / S - 1) > 0.001);
   const group = (side) => {
     const pts = near.filter(([, p]) => (side < 0 ? p < S : p > S)).sort((a, b) => (side < 0 ? b[1] - a[1] : a[1] - b[1]));

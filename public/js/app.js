@@ -55,6 +55,9 @@ async function loadAll(showBanner = true) {
     computeAll();
     Memory.snapshot(mkt, A.results);
     A.memStats = daily ? Memory.levelStats(mkt.symbol, daily.candles, daily.gmtoffset) : null;
+    await loadIndexGamma();
+    if (P.groupsOn.spx === undefined) P.groupsOn.spx = true;
+    renderToggles();
     renderQuote();
     renderExpChips();
     renderPriceChart(true);
@@ -68,6 +71,13 @@ async function loadAll(showBanner = true) {
   } finally {
     $('refreshBtn').disabled = false;
   }
+}
+
+// SPX / ES / QQQ gamma summaries (server-computed), used as confluence and on every tab.
+async function loadIndexGamma() {
+  const get = (s) => fetch(`/api/gamma?symbol=${s}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  const [spx, es, qqq] = await Promise.all(['SPX', 'ES', 'QQQ'].map(get));
+  A.idx = { spx, es, qqq };
 }
 
 function computeAll() {
@@ -87,8 +97,11 @@ function renderQuote() {
   const chg = q.price_change ?? 0, pc = q.price_change_percent ?? 0;
   $('qChg').textContent = `${fmt.signed(chg)} (${fmt.signed(pc)}%)`;
   $('qChg').className = `q-chg ${chg >= 0 ? 'up' : 'down'}`;
-  $('qMeta').title = $('qMeta').textContent = `IV30 ${q.iv30 ? q.iv30.toFixed(1) + '%' : '—'} · chain ${A.mkt.timestamp} ET (delayed)`;
-  $('qPrice').title = `IV30 ${q.iv30 ? q.iv30.toFixed(1) + '%' : '—'} · options chain as of ${A.mkt.timestamp} ET (15-min delayed CBOE data)`;
+  const ts = new Date(`${String(A.mkt.timestamp).replace(' ', 'T')}Z`).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' });
+  const esNote = q.basis != null ? ` · SPX ${q.spx_price.toFixed(2)} + basis ${q.basis >= 0 ? '+' : ''}${q.basis}` : '';
+  $('qMeta').title = $('qMeta').textContent = `IV30 ${q.iv30 ? q.iv30.toFixed(1) + '%' : '—'} · chain ${ts} ET (delayed)${esNote}`;
+  $('qPrice').title = `IV30 ${q.iv30 ? q.iv30.toFixed(1) + '%' : '—'} · options chain as of ${ts} ET (15-min delayed CBOE data)${q.basis != null ? `. /ES levels = SPX gamma levels + ES–SPX basis (${q.basis}); CME ES options data isn't free.` : ''}`;
+  document.querySelectorAll('[data-sym]').forEach((b) => b.classList.toggle('active', b.dataset.sym === A.mkt.symbol));
   document.title = `${A.mkt.symbol} ${fmt.num(A.mkt.spot)} · GammaDesk`;
 }
 
@@ -143,6 +156,7 @@ function renderToggles() {
     const dash = ['solid', 'dotted', 'dashed', 'dashed'][g.style];
     return `<span class="tog ${P.groupsOn[g.id] ? 'on' : ''}" data-group="${g.id}" data-tip="${g.desc}"><i style="border-top-style:${dash}"></i>${g.label}</span>`;
   }).join('');
+  if (A.mkt?.symbol === 'SPY') $('groupToggles').innerHTML += `<span class="tog ${P.groupsOn.spx ? 'on' : ''}" data-group="spx" data-tip="SPX gamma levels translated to SPY prices (follows the GEX panel's expiration set; weekly when 'Selected')"><i style="border-top-style:dotted;border-top-width:3px"></i>SPX</span>`;
   $('levelToggles').innerHTML = LEVEL_DEFS.map((d) => `<span class="tog ${P.levelsOn[d.id] ? 'on' : ''}" data-level="${d.id}" data-tip="${d.desc}"><span class="dot" style="background:${d.color}"></span>${d.label}</span>`).join('')
     + '<span class="tog" data-level="__all">All</span><span class="tog" data-level="__none">None</span>';
   const IND = [['vwap', 'VWAP', '#fbbf24', 'Session VWAP (resets each day)'], ['bands', 'VWAP ±1σ', '#fbbf24', 'Volume-weighted standard deviation bands around session VWAP'], ['avwap', '2D AVWAP', '#c084fc', 'VWAP anchored at the open of the previous session']];
@@ -221,6 +235,16 @@ function drawLevelLines() {
       axisLabelVisible: true, title: `${d.label} ${tags.join('·')}`,
     }));
   }
+  // SPX gamma levels translated into SPY prices (sparse dots), following the GEX panel's expiration set
+  const spx = A.idx?.spx, set = ['daily', 'weekly', 'monthly'].includes(P.gexGroup) ? P.gexGroup : 'weekly';
+  if (P.groupsOn.spx && spx && A.mkt.symbol === 'SPY' && spx.groups[set]) {
+    const k = A.mkt.spot / spx.spot;
+    for (const d of LEVEL_DEFS) {
+      const v = spx.groups[set].levels[d.id];
+      if (!P.levelsOn[d.id] || v == null) continue;
+      A.lines.push(A.series.createPriceLine({ price: v * k, color: d.color, lineWidth: 1, lineStyle: 4, axisLabelVisible: true, title: `${d.label} SPX ${v.toFixed(0)}` }));
+    }
+  }
 }
 
 function renderGex() {
@@ -229,7 +253,8 @@ function renderGex() {
   const s = r.spot;
   const rows = r.rows.filter((x) => Math.abs(x.k / s - 1) < 0.035 && (x.cOI + x.pOI + x.cVol + x.pVol) > 0);
   // keep whole-dollar strikes when the chain is very dense
-  const list = (rows.length > 70 ? rows.filter((x) => Number.isInteger(x.k)) : rows).slice().reverse();
+  const step = Math.ceil(rows.length / 70);
+  const list = (step > 1 ? rows.filter((_, i) => i % step === 0) : rows).slice().reverse();
   const labels = list.map((x) => x.k);
   const mode = P.gexMode;
   const pair = (cLabel, pLabel, cf, pf) => [
@@ -356,7 +381,8 @@ function botEnv(h) {
   const avg = (...xs) => { const v = xs.filter((x) => x > 0); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
   const rv = h === 'daily' ? (A.ip?.rvIntraday || A.rv5) : h === 'weekly' ? avg(A.rv5, A.rv20) : A.rv20;
   const sm = A.mkt.spot * iv.atm * Math.sqrt(Math.max(yearsTo(exp), 1 / 365));
-  return { S: A.mkt.spot, horizon: h, lv, all: A.results, ip: A.ip, iv, rv, vix: A.vix, mem: A.memStats, sm, exp };
+  const idx = { ...(A.idx || {}), map: A.idx?.spx && A.mkt.symbol === 'SPY' ? A.mkt.spot / A.idx.spx.spot : null };
+  return { S: A.mkt.spot, horizon: h, lv, all: A.results, ip: A.ip, iv, rv, vix: A.vix, mem: A.memStats, sm, exp, idx, symbol: A.mkt.symbol };
 }
 
 function renderBotLabels() {
@@ -393,6 +419,7 @@ function renderBot() {
   $('signals').innerHTML = Bot.SIGNALS.map((g) => `<span class="signal ${g.planned ? 'planned' : Bot.brain.signals[g.id] ? 'on' : ''}" data-signal="${g.id}" data-tip="${g.desc}">
     ${g.planned ? '' : `<input type="checkbox" ${Bot.brain.signals[g.id] ? 'checked' : ''} />`} ${g.name}${g.planned ? '<em>planned</em>' : ''}</span>`).join('');
   renderConfluence();
+  renderIndexGamma();
   renderIv();
   renderIntraday();
   renderLeaderboard(ctx);
@@ -423,6 +450,26 @@ function renderConfluence() {
   }).join('')}</tr>`;
   $('confTable').innerHTML = `<thead><tr><th>Signal</th>${hs.map((h) => `<th>${h.label} · ${fmtExp(Bot.horizonExp(A.mkt, h.id), false)}</th>`).join('')}</tr></thead><tbody>${body}${lean}</tbody>`;
   $('leanHint').textContent = 'chips show which trade theses each signal supports';
+}
+
+function renderIndexGamma() {
+  const I = A.idx || {};
+  const rows = [['SPX', I.spx], ['/ES', I.es], ['QQQ', I.qqq]].filter(([, g]) => g);
+  if (!rows.length) { $('idxTable').innerHTML = '<tbody><tr><td class="hint">Index gamma unavailable. If the server has not been restarted since this update, restart it (Ctrl+C, then node server.js).</td></tr></tbody>'; return; }
+  const k = A.idx?.spx && A.mkt.symbol === 'SPY' ? A.mkt.spot / A.idx.spx.spot : null;
+  const n = (v, d = 0) => (v == null ? '—' : (+v).toFixed(d));
+  const dist = (v, x) => (v == null ? '' : `<span class="dist">${fmt.signed((v / x - 1) * 100, 2)}%</span>`);
+  const body = rows.map(([name, g]) => ['daily', 'weekly', 'monthly'].filter((h) => g.groups[h]).map((h, i) => {
+    const x = g.groups[h], L = x.levels, d = name === 'QQQ' ? 2 : 0;
+    return `<tr>${i === 0 ? `<td rowspan="3" class="left"><b>${name}</b><br><span class="hint">${n(g.spot, d)}${g.basis != null ? ` · basis ${g.basis >= 0 ? '+' : ''}${g.basis}` : ''}</span></td>` : ''}
+      <td class="left">${Bot.HORIZONS.find((z) => z.id === h).label}</td>
+      <td class="${x.regime === 'positive' ? 'pos' : 'neg'}">${x.regime === 'positive' ? '+γ' : '−γ'} ${fmt.bigUsd(x.total)}</td>
+      <td>${n(x.flip, d)}${dist(x.flip, g.spot)}</td><td class="pos">${n(L.P1, d)}</td><td class="neg">${n(L.N1, d)}</td>
+      <td>${n(L.CW, d)}${dist(L.CW, g.spot)}</td><td>${n(L.PW, d)}${dist(L.PW, g.spot)}</td>
+      ${name === 'SPX' && k ? `<td class="hint">flip ${n(x.flip * k, 2)} · CW ${n(L.CW * k, 2)} · PW ${n(L.PW * k, 2)}</td>` : '<td></td>'}</tr>`;
+  }).join('')).join('');
+  $('idxTable').innerHTML = `<thead><tr><th>Index</th><th>Horizon</th><th>Regime · net GEX</th><th>Gamma flip</th><th>P1</th><th>N1</th><th>Call wall</th><th>Put wall</th><th>${k ? 'In SPY terms' : ''}</th></tr></thead><tbody>${body}</tbody>`;
+  $('idxHint').textContent = I.spx ? `chains as of ${new Date(`${String(I.spx.timestamp).replace(' ', 'T')}Z`).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })} ET` : '';
 }
 
 function renderIv() {
@@ -835,6 +882,13 @@ function wire() {
     if (t.dataset.tab === 'paper') { loadPaper(); PA.timer = setInterval(loadPaper, 60_000); }
     window.dispatchEvent(new Event('resize'));
   }));
+  $('symRow').onclick = (e) => {
+    const b = e.target.closest('[data-sym]');
+    if (!b || b.dataset.sym === P.symbol) return;
+    P.symbol = b.dataset.sym; P.customExps = null; savePrefs();
+    $('tickerInput').value = P.symbol;
+    loadAll();
+  };
   $('tickerForm').onsubmit = (e) => {
     e.preventDefault();
     const s = $('tickerInput').value.trim().toUpperCase();
