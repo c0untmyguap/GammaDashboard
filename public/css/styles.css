@@ -237,3 +237,13 @@ input[type=number], .legs input { background: var(--panel-2); color: var(--text)
 .tbl td.left { font-family: Inter, sans-serif; }
 .tag { display: inline-block; font: 600 10px Inter, sans-serif; padding: 1px 6px; border-radius: 4px; background: rgba(56,189,248,.15); color: var(--accent); margin-left: 4px; }
 .tbl tr.dim-row td { opacity: .55; }
+
+/* ---------- data source ---------- */
+.src-badge { display: inline-block; font: 600 10px Inter, sans-serif; letter-spacing: .04em; padding: 2px 7px; border-radius: 999px; margin-right: 4px; }
+.src-badge.live { background: rgba(34,197,94,.18); color: var(--green); }
+.src-badge.delayed { background: rgba(148,163,184,.15); color: var(--muted); }
+.src-badge.warn { background: rgba(245,158,11,.18); color: var(--amber); }
+.data-form ol { margin: 6px 0 0 18px; padding: 0; display: grid; gap: 8px; font-size: 13px; }
+.data-form code { font: 12px var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+.data-form .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+.data-form .kv b { font-family: var(--mono); }

@@ -31,7 +31,14 @@ export function buildMarket(j) {
     const x = byExp.get(j.expirations[c[0]]);
     if (!x) continue;
     const o = { type: c[1], k: c[2], bid: c[3], ask: c[4], last: c[5], iv: c[6], oi: c[7], vol: c[8], delta: c[9], gamma: c[10] };
-    (o.type === 'C' ? x.calls : x.puts).set(o.k, o);
+    const book = o.type === 'C' ? x.calls : x.puts;
+    const prev = book.get(o.k);
+    if (prev) {
+      // Same strike listed twice (e.g. SPX monthly + SPXW on the third Friday): combine open interest and
+      // volume for gamma, and keep the more actively traded contract's quotes.
+      const keep = (o.vol || 0) > (prev.vol || 0) ? o : prev;
+      book.set(o.k, { ...keep, oi: (prev.oi || 0) + (o.oi || 0), vol: (prev.vol || 0) + (o.vol || 0) });
+    } else book.set(o.k, o);
   }
 
   for (const x of byExp.values()) {
@@ -54,7 +61,7 @@ export function buildMarket(j) {
   }
 
   const exps = [...byExp.keys()].sort();
-  return { symbol: j.symbol, timestamp: j.timestamp, loadedAt: now, spot, quote: j.quote, exps, byExp };
+  return { symbol: j.symbol, timestamp: j.timestamp, loadedAt: now, spot, quote: j.quote, exps, byExp, source: j.source || 'cboe', delayed: j.delayed !== false };
 }
 
 function interp(pts, k, fallback) {

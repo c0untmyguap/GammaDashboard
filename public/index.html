@@ -36,6 +36,7 @@
       <button class="tab" data-tab="paper">Paper Account</button>
     </nav>
     <div class="top-actions">
+      <button class="btn ghost sm" id="dataBtn" title="Options data source and Schwab sign-in"><span id="srcBadge" class="src-badge delayed">Delayed · CBOE</span> Data</button>
       <label class="switch" title="Refresh chain & candles every 60s"><input type="checkbox" id="autoRefresh" /><span></span> Auto</label>
       <button class="btn ghost" id="refreshBtn" title="Reload data">↻ Refresh</button>
     </div>
@@ -422,6 +423,14 @@
       </div>
     </section>
   </main>
+
+  <dialog id="dataDialog" class="modal">
+    <form method="dialog" class="data-form">
+      <h2>Options data source</h2>
+      <div id="dataBody"></div>
+      <div class="btn-row end"><button class="btn ghost" value="close">Close</button></div>
+    </form>
+  </dialog>
 
   <div id="tooltip" class="tooltip hidden"></div>
   <script type="module" src="js/app.js"></script>

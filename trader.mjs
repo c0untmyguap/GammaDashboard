@@ -240,7 +240,9 @@ async function settle(c, date) {
 export async function tick(force = false) {
   if (busy) return;
   const now = Date.now();
-  if (!force && now - lastRun < CFG.checkEveryMs) return;
+  // real-time data (Schwab) allows tighter management than 15-min delayed quotes
+  const every = state.lastCheck?.source === 'schwab' ? 2 * 60e3 : CFG.checkEveryMs;
+  if (!force && now - lastRun < every) return;
   const t = et(now);
   if (!force && (t.date < CFG.startDate || ['Sat', 'Sun'].includes(t.dow) || t.hm < 9 * 60 + 35 || t.hm > 17 * 60)) return;
   busy = true;
@@ -248,7 +250,7 @@ export async function tick(force = false) {
   try {
     const c = await context();
     const tradingToday = String(c.mkt.quote.last_trade_time || '').startsWith(t.date);
-    state.lastCheck = { t: now, spot: c.mkt.spot, chainTs: c.raw.timestamp, tradingToday };
+    state.lastCheck = { t: now, spot: c.mkt.spot, chainTs: c.raw.timestamp, tradingToday, source: c.raw.source || 'cboe', delayed: c.raw.delayed !== false };
     if (tradingToday || force) {
       if (t.hm < 16 * 60 || force) {
         if (!state.trainedOn[t.date]) await trainSession(c, t.date);

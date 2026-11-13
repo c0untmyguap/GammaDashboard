@@ -11,7 +11,7 @@ node server.js
 ```
 Open http://localhost:5173.
 
-Optional environment variables:
+Optional settings (environment variables, or a `.env` file next to `server.js`; see `.env.example`):
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -19,6 +19,16 @@ Optional environment variables:
 | `APP_PASSWORD` | _(none)_ | If set, every page and API call asks for this password (any username) |
 | `DATA_DIR` | `./data` | Where the paper account and the bot's memory are stored |
 | `PAPER` | _(on)_ | Set to `off` to disable the paper-trading bot |
+| `DATA_PROVIDER` | `auto` | `auto` (Schwab when signed in, else CBOE), `schwab`, or `cboe` |
+| `SCHWAB_APP_KEY` / `SCHWAB_APP_SECRET` / `SCHWAB_CALLBACK` | _(none)_ | Schwab developer app credentials (see below) |
+
+## Real-time data (Schwab)
+By default options chains come from CBOE's free feed (about 15 minutes delayed). With a Schwab account you can switch to real-time chains through the Schwab Trader API (the same data thinkorswim shows):
+1. At developer.schwab.com, create an app with the **Market Data** product and a callback URL (e.g. `https://127.0.0.1`). Approval takes a few business days.
+2. Copy `.env.example` to `.env` and fill in `SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET` and `SCHWAB_CALLBACK` (exactly as registered). `.env` is git-ignored.
+3. Restart the server, click **Data** in the header, sign in to Schwab, and paste the address Schwab redirects you to.
+
+The server refreshes the 30-minute access token automatically. Schwab requires signing in again every 7 days; the header badge warns 24 hours ahead, and the app falls back to CBOE whenever Schwab isn't connected or a request fails. Sign-in tokens are stored in `DATA_DIR/schwab-tokens.json`. With real-time data the paper trader checks positions every 2 minutes instead of 5. `/ES` levels are still SPX levels plus the ES–SPX basis (Schwab's API doesn't provide futures options chains).
 
 ## Deploy (Render)
 1. Push this repo to GitHub.

@@ -1,12 +1,15 @@
 // GammaDesk server: serves the web app, proxies market data, and runs the paper-trading bot.
-// Options chain: CBOE delayed quotes (15-min delay). Candles: Yahoo Finance chart API.
+// Options chain: Schwab real-time (when connected) or CBOE delayed quotes (15-min delay).
+// Candles: Yahoo Finance chart API.
 // Run: node server.js   ->   http://localhost:5173
 //
-// Environment variables (all optional):
-//   PORT          port to listen on (default 5173)
-//   APP_PASSWORD  require this password (HTTP Basic auth, any username) for every page and API call
-//   DATA_DIR      folder for the paper account files (default ./data)
-//   PAPER=off     don't run the paper-trading bot
+// Settings come from environment variables or a .env file next to this one (see .env.example):
+//   PORT               port to listen on (default 5173)
+//   APP_PASSWORD       require this password (HTTP Basic auth, any username) for every page and API call
+//   DATA_DIR           folder for the paper account and Schwab sign-in files (default ./data)
+//   PAPER=off          don't run the paper-trading bot
+//   DATA_PROVIDER      auto (Schwab when connected, else CBOE; default) | schwab | cboe
+//   SCHWAB_APP_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK   Schwab developer app credentials
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,8 +17,10 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { buildMarket } from './public/js/data.js';
 import { computeLevels, groupExps } from './public/js/levels.js';
+import { createSchwab } from './schwab.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
+try { if (fs.existsSync(path.join(ROOT, '.env'))) process.loadEnvFile(path.join(ROOT, '.env')); } catch (e) { console.error('Could not read .env:', e.message); }
 const PORT = process.env.PORT || 5173;
 const PUBLIC = path.join(ROOT, 'public');
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
@@ -37,8 +42,31 @@ const CHAIN_SRC = { SPX: { cboe: '_SPX', roots: ['SPX', 'SPXW'] }, NDX: { cboe: 
 // Yahoo symbols for candles (^GSPC is unreliable intraday; ^SPX matches CBOE).
 const YAHOO = { SPX: '^SPX', ES: 'ES=F', NDX: '^NDX', NQ: 'NQ=F' };
 
+// ---------- data provider: Schwab (real-time) with CBOE (delayed) fallback ----------
+const PROVIDER = (process.env.DATA_PROVIDER || 'auto').toLowerCase();
+const schwab = createSchwab({
+  dir: DATA_DIR,
+  appKey: process.env.SCHWAB_APP_KEY,
+  appSecret: process.env.SCHWAB_APP_SECRET,
+  callback: process.env.SCHWAB_CALLBACK || 'https://127.0.0.1',
+});
+const useSchwab = () => PROVIDER !== 'cboe' && schwab.connected();
+const chainTtl = () => (useSchwab() ? 20_000 : 60_000); // Schwab allows ~120 requests/minute
+const getCachedChain = (sym) => cached(`chain:${sym}`, chainTtl(), () => getChain(sym));
+let lastFallback = null;
+
 async function getChain(sym) {
   if (sym === 'ES') return getEsChain();
+  if (useSchwab()) {
+    try { return await schwab.chain(sym); } catch (e) {
+      lastFallback = { t: Date.now(), sym, error: e.message };
+      console.error(`Schwab chain for ${sym} failed, using CBOE: ${e.message}`);
+    }
+  }
+  return getCboeChain(sym);
+}
+
+async function getCboeChain(sym) {
   const src = CHAIN_SRC[sym] || { cboe: sym, roots: [sym] };
   const r = await fetch(`https://cdn.cboe.com/api/global/delayed_quotes/options/${src.cboe}.json`, { headers: UA });
   if (!r.ok) throw new Error(`CBOE returned ${r.status} for ${sym}`);
@@ -56,7 +84,7 @@ async function getChain(sym) {
     // [expIdx, type, strike, bid, ask, last, iv, oi, volume, delta, gamma]
     contracts.push([expIndex.get(e), m[2], +m[3] / 1000, o.bid, o.ask, o.last_trade_price, o.iv, o.open_interest, o.volume, o.delta, o.gamma]);
   }
-  return { symbol: sym, timestamp: d.timestamp, quote, expirations, contracts };
+  return { symbol: sym, source: 'cboe', delayed: true, timestamp: d.timestamp, quote, expirations, contracts };
 }
 
 // ES-SPX basis: median difference of the last 6 matching 5-minute closes of ES=F and ^SPX.
@@ -73,7 +101,7 @@ async function getEsBasis() {
 
 // CME doesn't publish ES options data for free, so /ES gamma = SPX gamma shifted by the ES-SPX basis.
 async function getEsChain() {
-  const [spx, b] = await Promise.all([cached('chain:SPX', 60_000, () => getChain('SPX')), getEsBasis()]);
+  const [spx, b] = await Promise.all([getCachedChain('SPX'), getEsBasis()]);
   const shift = Math.round(b.basis * 4) / 4; // ES ticks in 0.25s
   const q = spx.quote;
   return {
@@ -87,7 +115,7 @@ async function getEsChain() {
 // Compact gamma levels per expiration set, computed server-side (used by the bot, the trader and the index panel).
 async function getGamma(sym) {
   return cached(`gamma:${sym}`, 60_000, async () => {
-    const raw = await cached(`chain:${sym}`, 60_000, () => getChain(sym));
+    const raw = await getCachedChain(sym);
     const mkt = buildMarket(raw);
     const groups = {};
     for (const g of ['daily', 'weekly', 'monthly']) {
@@ -118,6 +146,15 @@ async function getCandles(sym, tf) {
   return { symbol: sym, tf, gmtoffset: res.meta.gmtoffset, candles };
 }
 
+function readBody(req, limit = 64_000) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (c) => { data += c; if (data.length > limit) { reject(new Error('Body too large')); req.destroy(); } });
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
+}
+
 function sendJson(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(obj));
@@ -142,6 +179,20 @@ const server = http.createServer(async (req, res) => {
     return res.end('Password required');
   }
   try {
+    if (url.pathname === '/api/source') return sendJson(res, 200, { provider: PROVIDER, active: useSchwab() ? 'schwab' : 'cboe', schwab: schwab.status(), lastFallback });
+    if (url.pathname === '/api/schwab/auth-url') {
+      if (!schwab.configured()) return sendJson(res, 400, { error: 'Add SCHWAB_APP_KEY and SCHWAB_APP_SECRET to .env, then restart the server.' });
+      return sendJson(res, 200, { url: schwab.authUrl() });
+    }
+    if (url.pathname === '/api/schwab/connect' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const st = await schwab.connect(body.url);
+        cache.clear(); // re-fetch chains from Schwab right away
+        return sendJson(res, 200, st);
+      } catch (e) { return sendJson(res, 400, { error: e.message }); }
+    }
+    if (url.pathname === '/api/schwab/disconnect' && req.method === 'POST') { cache.clear(); return sendJson(res, 200, schwab.disconnect()); }
     if (url.pathname === '/api/paper') {
       if (!trader) return sendJson(res, 503, { error: 'Paper trader is starting' });
       return sendJson(res, 200, trader.snapshot());
@@ -150,7 +201,7 @@ const server = http.createServer(async (req, res) => {
       const sym = (url.searchParams.get('symbol') || 'SPY').toUpperCase();
       // ^ prefix allowed for Yahoo index symbols such as ^VIX (candles only)
       if (!/^\^?[A-Z_]{1,6}$/.test(sym)) return sendJson(res, 400, { error: 'Invalid symbol' });
-      if (url.pathname === '/api/chain') return sendJson(res, 200, await cached(`chain:${sym}`, 60_000, () => getChain(sym)));
+      if (url.pathname === '/api/chain') return sendJson(res, 200, await getCachedChain(sym));
       if (url.pathname === '/api/gamma') return sendJson(res, 200, await getGamma(sym));
       if (url.pathname === '/api/candles') {
         const tf = url.searchParams.get('tf') || '5m';
@@ -170,7 +221,11 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`GammaDesk running at http://localhost:${PORT}${PASSWORD ? ' (password protected)' : ''}`));
+server.listen(PORT, () => {
+  console.log(`GammaDesk running at http://localhost:${PORT}${PASSWORD ? ' (password protected)' : ''}`);
+  const st = schwab.status();
+  console.log(`Options data: ${useSchwab() ? `Schwab real-time (sign-in valid ${st.hoursLeft.toFixed(0)} more hours)` : st.configured ? 'CBOE delayed; Schwab configured but not signed in (use the Data button in the app)' : 'CBOE delayed (Schwab not configured)'}.`);
+});
 
 // Paper trader: runs the bot on a fake $10,000 account while this server is running.
 let trader = null;
@@ -178,7 +233,7 @@ if (process.env.PAPER !== 'off') {
   import('./trader.mjs')
     .then((m) => {
       trader = m.start({
-        getChain: (s) => cached(`chain:${s}`, 60_000, () => getChain(s)),
+        getChain: getCachedChain,
         getCandles: (s, tf) => cached(`candles:${s}:${tf}`, 60_000, () => getCandles(s, tf)),
         getGamma,
         dir: DATA_DIR,

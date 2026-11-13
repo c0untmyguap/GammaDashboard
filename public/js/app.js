@@ -59,7 +59,7 @@ async function loadAll(showBanner = true) {
     computeAll();
     Memory.snapshot(mkt, A.results);
     A.memStats = daily ? Memory.levelStats(mkt.symbol, daily.candles, daily.gmtoffset) : null;
-    await loadIndexGamma();
+    await Promise.all([loadIndexGamma(), loadSource()]);
     if (stale()) return;
     if (P.groupsOn.spx === undefined) P.groupsOn.spx = true;
     renderToggles();
@@ -75,6 +75,93 @@ async function loadAll(showBanner = true) {
     if (showBanner && !stale()) banner(`Could not load ${P.symbol}: ${e.message}. Is the local server running (node server.js)?`);
   } finally {
     if (!stale()) $('refreshBtn').disabled = false;
+  }
+}
+
+// ---------------- data source (Schwab / CBOE) ----------------
+async function loadSource() {
+  try {
+    const r = await fetch('/api/source', { cache: 'no-store' });
+    A.source = r.ok ? await r.json() : null;
+  } catch { A.source = null; }
+  renderSourceBadge();
+}
+
+function renderSourceBadge() {
+  const s = A.source, b = $('srcBadge');
+  const sw = s?.schwab;
+  if (s?.active === 'schwab') {
+    const warn = sw.hoursLeft != null && sw.hoursLeft < 24;
+    b.className = `src-badge ${warn ? 'warn' : 'live'}`;
+    b.textContent = warn ? `Real-time · sign-in ends in ${Math.max(0, sw.hoursLeft).toFixed(0)}h` : 'Real-time · Schwab';
+    if (warn) banner(`Your Schwab sign-in expires in about ${Math.max(0, sw.hoursLeft).toFixed(0)} hours (Schwab requires signing in every 7 days). Use the Data button to sign in again; until then the app falls back to delayed CBOE data.`, 'info');
+  } else {
+    b.className = 'src-badge delayed';
+    b.textContent = sw?.configured && sw.expiresAt && !sw.connected ? 'Delayed · Schwab sign-in expired' : 'Delayed · CBOE';
+  }
+}
+
+function renderDataDialog() {
+  const s = A.source;
+  const sw = s?.schwab;
+  const t = (ms) => (ms ? new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET' : '—');
+  let html;
+  if (!s) html = '<p class="hint">The server didn\'t answer. If it hasn\'t been restarted since this update, restart it (Ctrl+C, then <code>node server.js</code>).</p>';
+  else if (!sw.configured) {
+    html = `<p>Now using <b>CBOE delayed data</b> (about 15 minutes behind).</p>
+      <p>To switch to <b>real-time Schwab data</b> once your developer app is approved:</p>
+      <ol>
+        <li>In the project folder, copy <code>.env.example</code> to a new file named <code>.env</code>.</li>
+        <li>From developer.schwab.com → your app, paste the <b>App Key</b> into <code>SCHWAB_APP_KEY=</code> and the <b>Secret</b> into <code>SCHWAB_APP_SECRET=</code>. Keep <code>SCHWAB_CALLBACK</code> identical to the callback URL on your Schwab app.</li>
+        <li>Restart the server, then open this panel again to sign in.</li>
+      </ol>
+      <p class="hint">.env stays on your computer; it's excluded from GitHub.</p>`;
+  } else if (!sw.connected) {
+    html = `<p>Schwab is set up but not signed in${sw.expiresAt ? ' (the last sign-in expired)' : ''}. Using <b>CBOE delayed data</b> for now.</p>
+      <ol>
+        <li><button type="button" class="btn sm primary" id="schwabLogin">Sign in to Schwab</button> — a Schwab login opens in a new tab. Approve access to your account.</li>
+        <li>Schwab then sends you to <code>${sw.callback}</code>, which shows an error page — that's expected. <b>Copy the full address</b> from that tab's address bar.</li>
+        <li>Paste it here: <input id="schwabUrl" class="txt" placeholder="${sw.callback}/?code=…" style="margin-top:6px" />
+          <button type="button" class="btn sm primary" id="schwabConnect" style="margin-top:6px">Connect</button></li>
+      </ol>
+      <p class="hint" id="schwabMsg">${sw.lastError ? `Last error: ${sw.lastError}` : 'The code in that address is single-use and expires within about 30 seconds, so paste it promptly.'}</p>`;
+  } else {
+    html = `<div class="kv">
+        <span>Source</span><b class="pos">Schwab real-time${s.active !== 'schwab' ? ' (DATA_PROVIDER=cboe overrides it)' : ''}</b>
+        <span>Signed in</span><b>${t(sw.signedInAt)}</b>
+        <span>Sign-in expires</span><b class="${sw.hoursLeft < 24 ? 'neg' : ''}">${t(sw.expiresAt)} (${sw.hoursLeft.toFixed(0)}h left)</b>
+        <span>Last chain</span><b>${t(sw.lastOk)}</b>
+        ${sw.lastError ? `<span>Last error</span><b class="neg">${sw.lastError}</b>` : ''}
+        ${s.lastFallback ? `<span>Last fallback</span><b>${t(s.lastFallback.t)} · ${s.lastFallback.sym}</b>` : ''}
+      </div>
+      <p class="hint">Schwab requires signing in again every 7 days. The badge turns amber in the last 24 hours, and the app falls back to delayed CBOE data if the sign-in lapses.</p>
+      <div class="btn-row"><button type="button" class="btn sm" id="schwabLogin">Sign in again</button><button type="button" class="btn sm ghost" id="schwabDisconnect">Disconnect</button></div>
+      <p class="hint" id="schwabMsg"></p>`;
+    if (!sw.connected) html += '';
+  }
+  $('dataBody').innerHTML = html;
+}
+
+async function schwabAction(e) {
+  const id = e.target.id;
+  const msg = (t) => { const m = $('schwabMsg'); if (m) m.textContent = t; };
+  if (id === 'schwabLogin') {
+    const r = await fetch('/api/schwab/auth-url').then((x) => x.json()).catch(() => ({}));
+    if (!r.url) return msg(r.error || 'Could not build the Schwab sign-in link.');
+    window.open(r.url, '_blank', 'noopener');
+    if (A.source?.schwab.connected) { A.source.schwab.connected = false; renderDataDialog(); }
+  }
+  if (id === 'schwabConnect') {
+    msg('Connecting…');
+    const r = await fetch('/api/schwab/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: $('schwabUrl').value }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return msg(j.error || 'Sign-in failed.');
+    await loadSource(); renderDataDialog(); loadAll();
+  }
+  if (id === 'schwabDisconnect') {
+    if (!confirm('Disconnect Schwab? The app will use delayed CBOE data until you sign in again.')) return;
+    await fetch('/api/schwab/disconnect', { method: 'POST' });
+    await loadSource(); renderDataDialog(); loadAll();
   }
 }
 
@@ -104,8 +191,9 @@ function renderQuote() {
   $('qChg').className = `q-chg ${chg >= 0 ? 'up' : 'down'}`;
   const ts = new Date(`${String(A.mkt.timestamp).replace(' ', 'T')}Z`).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' });
   const esNote = q.basis != null ? ` · SPX ${q.spx_price.toFixed(2)} + basis ${q.basis >= 0 ? '+' : ''}${q.basis}` : '';
-  $('qMeta').title = $('qMeta').textContent = `IV30 ${q.iv30 ? q.iv30.toFixed(1) + '%' : '—'} · chain ${ts} ET (delayed)${esNote}`;
-  $('qPrice').title = `IV30 ${q.iv30 ? q.iv30.toFixed(1) + '%' : '—'} · options chain as of ${ts} ET (15-min delayed CBOE data)${q.basis != null ? `. /ES levels = SPX gamma levels + ES–SPX basis (${q.basis}); CME ES options data isn't free.` : ''}`;
+  const live = A.mkt.source === 'schwab' && !A.mkt.delayed;
+  $('qMeta').title = $('qMeta').textContent = `IV30 ${q.iv30 ? q.iv30.toFixed(1) + '%' : '—'} · chain ${ts} ET (${live ? 'real-time' : 'delayed'})${esNote}`;
+  $('qPrice').title = `IV30 ${q.iv30 ? q.iv30.toFixed(1) + '%' : '—'} · options chain as of ${ts} ET (${live ? 'real-time Schwab data' : A.mkt.source === 'schwab' ? 'delayed Schwab data' : '15-min delayed CBOE data'})${q.basis != null ? `. /ES levels = SPX gamma levels + ES–SPX basis (${q.basis}); CME ES options data isn't free.` : ''}`;
   document.querySelectorAll('[data-sym]').forEach((b) => b.classList.toggle('active', b.dataset.sym === A.mkt.symbol));
   document.title = `${A.mkt.symbol} ${fmt.num(A.mkt.spot)} · GammaDesk`;
 }
@@ -821,7 +909,7 @@ function renderPaper() {
   $('paperStatus').className = 'banner info';
   $('paperStatus').innerHTML = !started
     ? `<b>Armed.</b> The bot starts trading <b>${cfg.startDate}</b> at 10:00 ET with $${cfg.startCapital.toLocaleString()} of paper money. Keep the server running (and the computer awake) during market hours, 9:30–4:15 ET.`
-    : `<b>Running.</b> ${lc ? `Last check ${t(lc.t)} ET · SPY ${lc.spot.toFixed(2)} · chain ${lc.chainTs} (15-min delayed)${lc.tradingToday ? '' : ' · market closed'}` : 'Waiting for the first check (every 5 minutes, 9:35–5:00 ET on trading days).'} The server must stay running for the bot to trade.`;
+    : `<b>Running.</b> ${lc ? `Last check ${t(lc.t)} ET · SPY ${lc.spot.toFixed(2)} · data ${lc.source === 'schwab' && !lc.delayed ? 'real-time (Schwab), checks every 2 min' : '15-min delayed (CBOE), checks every 5 min'}${lc.tradingToday ? '' : ' · market closed'}` : 'Waiting for the first check (9:35–5:00 ET on trading days).'} The server must stay running for the bot to trade.`;
 
   const tiles = [
     ['Equity', fmt.usd(equity, 0), `started ${fmt.usd(st.startCapital, 0)}`, pl >= 0 ? 'pos' : 'neg'],
@@ -892,6 +980,9 @@ function wire() {
     if (t.dataset.tab === 'paper') { loadPaper(); PA.timer = setInterval(loadPaper, 60_000); }
     window.dispatchEvent(new Event('resize'));
   }));
+  $('dataBtn').onclick = async () => { await loadSource(); renderDataDialog(); $('dataDialog').showModal(); };
+  $('dataBody').addEventListener('click', schwabAction);
+  setInterval(loadSource, 5 * 60e3);
   $('symRow').onclick = (e) => {
     const b = e.target.closest('[data-sym]');
     if (!b || b.dataset.sym === P.symbol) return;

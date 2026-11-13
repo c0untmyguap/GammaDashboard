@@ -1,9 +1,10 @@
 # Paper-trading account and the bot's learned memory (personal, changes constantly)
 data/
 
-# Local secrets
+# Local secrets (Schwab sign-in tokens live in data/)
 .env
 .env.*
+!.env.example
 
 # Editor / OS / tooling
 .claude/
